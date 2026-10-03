@@ -1,0 +1,87 @@
+# Tavern Manager Sync
+
+A SillyTavern extension for bidirectional synchronization of Characters and WorldBooks with [Tavern Manager](https://github.com/JL0952/ST_manager).
+
+## Features
+
+- Bidirectional Character and WorldBook sync
+- Push local SillyTavern entities to Tavern Manager
+- Pull Manager entities into SillyTavern
+- Sync All with conflict/overwrite handling
+- Character avatars on Push and Pull (Push replaces the Manager avatar with SillyTavern's)
+- A creator-notes line under each Character, so same-name Characters can be told apart
+- Display-name and creator-notes search for Push/Pull lists
+- Cards that cannot be synced are listed as **Cannot sync** with the reason instead of stopping Refresh; Pull can still overwrite them from Manager
+- UI follows SillyTavern themes
+- Local/LAN Manager support
+
+## Requirements
+
+- SillyTavern or TauriTavern
+- Tavern Manager
+- Git
+- Tavern Manager's sync API running and reachable from the SillyTavern instance
+
+## Installation
+
+### SillyTavern
+
+Open:
+
+**Extensions → Install Extension**
+
+Enter the Git repository URL:
+
+`https://github.com/JL0952/tavern-manager-sync`
+
+Then install the extension and reload SillyTavern.
+
+### TauriTavern
+
+Install it the same way, from **Extensions → Install Extension** with the Git repository URL above, then reload TauriTavern.
+
+## Manager Endpoint
+
+If Tavern Manager runs on the same machine as SillyTavern:
+
+`http://127.0.0.1:3000/api/sync/v1`
+
+If SillyTavern runs on another device on the same LAN:
+
+`http://<manager-lan-ip>:3000/api/sync/v1`
+
+Port `3000` is the Tavern Manager sync API.
+
+The Vite development port `5173` is only for the Manager web UI and should not be used as the sync endpoint.
+
+## Usage
+
+1. Start Tavern Manager.
+2. Open the Tavern Manager Sync extension in SillyTavern.
+3. Enter the Manager endpoint.
+4. Click **Save**.
+5. Click **Refresh** to discover Characters and WorldBooks.
+6. Use **Push**, **Pull**, or **Sync All**.
+
+## Compatibility
+
+The extension supports both SillyTavern and TauriTavern.
+
+TauriTavern uses a different WorldBook discovery API, which is handled automatically by the extension.
+
+## Known Limitations
+
+- Avatars are not part of the sync content hash. A changed avatar alone does not mark a Character as changed and Sync All does not transfer it; Push or Pull that Character to send it.
+- An avatar that fails to transfer does not undo the verified card content; the result message lists it as a warning.
+
+## Development
+
+Run the tests with Node:
+
+```
+npm test
+```
+
+Some tests check the extension against SillyTavern's own code. They use the SillyTavern install this extension lives in, or `ST_SYNC_ST_ROOT`, and are skipped when neither is found.
+
+`sync-core/` is copied verbatim from Tavern Manager (`npm run sync-core:export` there); do not edit it here.
