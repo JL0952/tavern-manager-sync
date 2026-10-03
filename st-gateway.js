@@ -54,6 +54,20 @@ export function createNativeStGateway({ fetch: fetchImpl = globalThis.fetch, req
     return error;
   }
 
+  // A Character's card file is its avatar image, served at /characters/. An
+  // absent file is a plain 404 on every host, while TauriTavern reports an
+  // /api/characters/get for an unknown Character as a backend error.
+  async function characterFileExists(avatarFileName) {
+    const response = await fetchImpl(`/characters/${encodeURIComponent(avatarFileName)}`, {
+      method: "HEAD",
+      headers: requestHeaders(),
+      cache: "no-store",
+    });
+    if (response.status === 404) return false;
+    if (!response.ok) throw new Error(`SillyTavern character file check returned HTTP ${response.status}.`);
+    return true;
+  }
+
   async function settingsWorldNames() {
     const response = await nativePost("/api/settings/get", {}, "SillyTavern settings");
     return worldNamesFromSettings(await response.json());
@@ -111,6 +125,7 @@ export function createNativeStGateway({ fetch: fetchImpl = globalThis.fetch, req
       const fileId = decodeURIComponent(localId);
 
       if (entityType === "character") {
+        if (!(await characterFileExists(fileId))) throw missingLocal("SillyTavern character");
         const response = await post("/api/characters/get", { avatar_url: fileId });
         if (response.status === 404) throw missingLocal("SillyTavern character");
         if (!response.ok) throw new Error(`SillyTavern character reread returned HTTP ${response.status}.`);
@@ -206,9 +221,7 @@ export function createNativeStGateway({ fetch: fetchImpl = globalThis.fetch, req
       while (true) {
         fileName = `tavern-sync-${uuid()}`;
         if (reservedLocalIds.includes(encodeURIComponent(`${fileName}.png`))) continue;
-        const existing = await post("/api/characters/get", { avatar_url: `${fileName}.png` });
-        if (existing.status === 404) break;
-        if (!existing.ok) throw new Error(`Character filename check returned HTTP ${existing.status}.`);
+        if (!(await characterFileExists(`${fileName}.png`))) break;
       }
       const response = await nativePost(
         "/api/characters/create",

@@ -24,7 +24,8 @@ function gatewayWith(handler, { requests = [], worldbookList } = {}) {
     fetch: async (url, options) => {
       requests.push({ url, options });
       const path = new URL(url, "http://st.test").pathname;
-      const body = JSON.parse(options.body);
+      // The /characters/ file check is a HEAD without a body.
+      const body = options.body === undefined ? undefined : JSON.parse(options.body);
       if (path === "/api/files/sanitize-filename") {
         return response({ fileName: sanitize(String(body.fileName)) });
       }
@@ -114,22 +115,27 @@ test("WorldBook creation stores names through ST's sanitize rule", needsSillyTav
 test("Character creation allows identical names and checks its unique filename before writing", async () => {
   const writes = [];
   const checked = new Set();
+  const requests = [];
   const gateway = gatewayWith((path, body) => {
-    if (path === "/api/characters/get") {
-      checked.add(body.avatar_url);
-      return response({}, 404);
+    if (path.startsWith("/characters/")) {
+      checked.add(decodeURIComponent(path.slice("/characters/".length)));
+      return new Response(null, { status: 404 });
     }
     assert.equal(path, "/api/characters/create");
     assert.ok(checked.has(`${body.file_name}.png`), "check destination before create");
     writes.push(body);
     return new Response(`${body.file_name}.png`);
-  });
+  }, { requests });
   const canonical = createCanonicalCharacterProjection({ name: "Same Name", extensions: {
     depth_prompt: { prompt: "Synthetic note", depth: 0, role: "user" } } });
   const first = await gateway.createCharacter({ canonical });
   const second = await gateway.createCharacter({ canonical });
   assert.deepEqual([first, second], ["tavern-sync-uuid-1.png", "tavern-sync-uuid-2.png"]);
   assert.deepEqual(writes.map((body) => body.ch_name), ["Same Name", "Same Name"]);
+  assert.ok(requests.filter(({ url }) => url.startsWith("/characters/")).every(({ options }) => options.method === "HEAD"
+    && options.cache === "no-store" && options.headers["X-CSRF-Token"] === "synthetic-token"));
+  // TauriTavern reports a get for an unknown Character as a backend error.
+  assert.ok(!requests.some(({ url }) => url === "/api/characters/get"));
   for (const body of writes) {
     assert.equal(body.depth_prompt_prompt, "Synthetic note");
     assert.equal(body.depth_prompt_depth, 0);
@@ -171,16 +177,36 @@ test("WorldBook native creation uses the requested name when the storage file_id
 });
 
 test("missing local Character and World Info are reported as missing, other failures are not", async () => {
+  const requests = [];
   const gateway = gatewayWith((path) => {
-    if (path === "/api/characters/get") return response({}, 404);
+    if (path === "/characters/Gone.png") return new Response(null, { status: 404 });
     if (path === "/api/worldinfo/list") return response([{ file_id: "Other" }]);
     throw new Error(`Unexpected native request ${path}.`);
-  });
+  }, { requests });
   await assert.rejects(gateway.readLocal({ entityType: "character", localId: "Gone.png" }), { code: "missing_local" });
   await assert.rejects(gateway.readLocal({ entityType: "worldbook", localId: "Lore" }), { code: "missing_local" });
+  assert.ok(!requests.some(({ url }) => url === "/api/characters/get"), "a missing card file is never fetched by get");
+  // A file removed between the check and the read is still missing.
+  const raced = gatewayWith((path) => path === "/api/characters/get" ? response({}, 404) : new Response(null, { status: 200 }));
+  await assert.rejects(raced.readLocal({ entityType: "character", localId: "A.png" }), { code: "missing_local" });
   const failing = gatewayWith(() => response({}, 500));
   await assert.rejects(failing.readLocal({ entityType: "character", localId: "A.png" }),
     (error) => error.code === undefined && /HTTP 500/.test(error.message));
+  const failingRead = gatewayWith((path) => path === "/api/characters/get" ? response({}, 500) : new Response(null, { status: 200 }));
+  await assert.rejects(failingRead.readLocal({ entityType: "character", localId: "A.png" }),
+    (error) => error.code === undefined && /HTTP 500/.test(error.message));
+});
+
+test("an existing card file is never chosen as a new Character's filename", async () => {
+  const gateway = gatewayWith((path, body) => {
+    if (path === "/characters/tavern-sync-uuid-1.png") return new Response(null, { status: 200 });
+    if (path.startsWith("/characters/")) return new Response(null, { status: 404 });
+    assert.equal(path, "/api/characters/create");
+    return new Response(`${body.file_name}.png`);
+  });
+  const canonical = createCanonicalCharacterProjection({ name: "Taken", extensions: {
+    depth_prompt: { prompt: "", depth: 4, role: "system" } } });
+  assert.equal(await gateway.createCharacter({ canonical }), "tavern-sync-uuid-2.png");
 });
 
 test("avatars use ST's card image and its own edit-avatar upload, without a JSON Content-Type", async () => {
