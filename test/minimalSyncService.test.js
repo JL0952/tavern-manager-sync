@@ -645,3 +645,169 @@ test("a Manager without the avatar route is a warning, never taken as having no 
   assert.deepEqual(pulled.warnings, ["A: avatar not written (this Manager has no avatar sync; restart or update Manager)"]);
   assert.equal(pulled.frontendChanges.at(-1).avatarChanged, false);
 });
+
+// Push All and Pull All.
+const charNamed = (name, world = null) => {
+  const value = char(name, world);
+  value.rawCard.data.name = name;
+  return value;
+};
+
+async function runAll(f, action, { answer = true, cancelAfter = Infinity, discovery = f.discovery() } = {}) {
+  const asked = [];
+  const progress = [];
+  const result = await f.service[action]({ discovery, adapter: f.adapter,
+    confirm: async (counts) => { asked.push(counts); return answer; },
+    onProgress: ({ done }) => progress.push(done),
+    isCancelled: () => progress.length >= cancelAfter });
+  return { result, asked, progress };
+}
+
+const outcome = (result) => Object.fromEntries(result.results.map((entry) => [entry.displayName, entry]));
+
+test("Push All sends every ST-only entity, WorldBooks first, and binds them without Manager rereads", async () => {
+  const f = fixture();
+  f.local("character", "Linked.png", charNamed("Linked", "Lore"));
+  f.local("worldbook", "Lore", wb());
+  f.local("character", "Plain.png", charNamed("Plain"));
+  f.stAvatars.set("Plain.png", new Blob(["plain picture"], { type: "image/png" }));
+  // Already in Manager: Push All leaves both sides alone.
+  f.local("character", "Bound.png", charNamed("Bound"));
+  f.remote("character", "m1", canonical("character", charNamed("Bound edited in Manager")));
+  f.bind("character", "m1", "Bound.png");
+
+  const { result, asked, progress } = await runAll(f, "pushAll");
+  assert.deepEqual(asked, [{ characters: 2, worldbooks: 1 }]);
+  assert.deepEqual(progress, [1, 2, 3]);
+  assert.deepEqual(f.calls.manager.filter((call) => call.startsWith("POST")), ["POST worldbooks", "POST characters", "POST characters"]);
+  assert.deepEqual(f.calls.manager.filter((call) => call.startsWith("GET ") && call !== "GET manifest"), [],
+    "a created entity is not read back from Manager");
+  const results = outcome(result);
+  assert.deepEqual(Object.values(results).map((entry) => entry.status), ["pushed", "pushed", "pushed"]);
+
+  const { bindings } = await f.store.read();
+  const bookId = results.Lore.managerId;
+  assert.equal(f.remotes.get(`character:${results.Linked.managerId}`).canonical.relationship.worldBookId, bookId);
+  for (const name of ["Lore", "Linked", "Plain"]) {
+    const { entityType, managerId, localId } = results[name];
+    assert.deepEqual(bindings[`${entityType}:${managerId}`],
+      { managerId, localId, baseHash: f.remotes.get(`${entityType}:${managerId}`).contentHash });
+  }
+  assert.deepEqual(bindings["character:m1"], { managerId: "m1", localId: "Bound.png", baseHash: null });
+  assert.equal(f.remotes.get("character:m1").revision, 1);
+  assert.equal(readEmbeddedManagerId(f.locals.get("character:Plain.png").rawCard), results.Plain.managerId);
+  assert.equal(await f.managerAvatars.get(results.Plain.managerId).text(), "plain picture");
+  assert.deepEqual(result.frontendChanges.map((change) => [change.localId, change.created]).sort(),
+    [["Linked.png", false], ["Plain.png", false]]);
+});
+
+test("Push All fails only a Character whose WorldBook is not in Manager; a declined Push All writes nothing", async () => {
+  const f = fixture();
+  f.local("character", "Orphan.png", charNamed("Orphan", "Missing Lore"));
+  f.local("character", "Plain.png", charNamed("Plain"));
+  const declined = await runAll(f, "pushAll", { answer: false });
+  assert.equal(declined.result.cancelled, true);
+  assert.deepEqual(f.calls.manager.filter((call) => !call.startsWith("GET")), []);
+  assert.deepEqual((await f.store.read()).bindings, {});
+
+  const { result } = await runAll(f, "pushAll");
+  const results = outcome(result);
+  assert.equal(results.Orphan.status, "failed");
+  assert.match(results.Orphan.message, /linked WorldBook is not in Manager/);
+  assert.equal(results.Plain.status, "pushed");
+  assert.deepEqual(f.calls.manager.filter((call) => call.startsWith("POST")), ["POST characters"]);
+});
+
+test("Push All writes bindings in checkpoints, not once per entity", async () => {
+  const f = fixture();
+  for (let index = 0; index < 45; index += 1) f.local("character", `C${index}.png`, charNamed(`C${index}`));
+  let updates = 0;
+  const update = f.store.update;
+  f.store.update = async (fn) => { updates += 1; return update(fn); };
+  const { result } = await runAll(f, "pushAll");
+  assert.equal(result.results.filter((entry) => entry.status === "pushed").length, 45);
+  assert.equal(Object.keys((await f.store.read()).bindings).length, 45);
+  assert.ok(updates <= 4, `${updates} sync state writes for 45 entities`);
+});
+
+test("stopping Push All keeps what finished; a binding another tab changed fails only its item", async () => {
+  const f = fixture();
+  for (let index = 0; index < 8; index += 1) f.local("character", `C${index}.png`, charNamed(`C${index}`));
+  const { result } = await runAll(f, "pushAll", { cancelAfter: 1 });
+  assert.equal(result.cancelled, true);
+  assert.ok(result.results.length < 8, `${result.results.length} of 8 ran`);
+  const bound = Object.values((await f.store.read()).bindings).map((binding) => binding.localId).sort();
+  assert.deepEqual(bound, result.results.filter((entry) => entry.status === "pushed").map((entry) => entry.localId).sort());
+
+  const g = fixture();
+  g.local("character", "Mine.png", charNamed("Mine"));
+  g.local("character", "Other.png", charNamed("Other"));
+  const update = g.store.update;
+  let first = true;
+  g.store.update = async (fn) => {
+    if (first) { first = false; g.bind("character", "other-tab", "Mine.png"); }
+    return update(fn);
+  };
+  const conflicted = outcome((await runAll(g, "pushAll")).result);
+  assert.equal(conflicted.Mine.status, "failed");
+  assert.match(conflicted.Mine.message, /Another tab or device changed this binding/);
+  assert.equal(conflicted.Other.status, "pushed");
+  const { bindings } = await g.store.read();
+  assert.equal(bindings["character:other-tab"].localId, "Mine.png");
+  assert.equal(Object.values(bindings).filter((binding) => binding.localId === "Mine.png").length, 1);
+});
+
+test("Pull All copies Manager-only entities, skips a same-name WorldBook with its Characters, and never rereads Manager", async () => {
+  const f = linkedFixture();
+  f.remote("worldbook", "taken", canonical("worldbook", wb("theirs", "Taken")));
+  f.remote("character", "c", { ...canonical("character", charNamed("Uses Taken")), relationship: { worldBookId: "taken" } });
+  f.remote("character", "d", canonical("character", charNamed("Plain")));
+  f.managerAvatars.set("d", new Blob(["manager picture"], { type: "image/png" }));
+  f.local("worldbook", "Taken", wb("mine", "Taken"));
+  // Already in ST: Pull All leaves it alone.
+  f.local("character", "Bound.png", charNamed("Bound"));
+  f.remote("character", "m1", canonical("character", charNamed("Bound edited in Manager")));
+  f.bind("character", "m1", "Bound.png");
+
+  const { result, asked } = await runAll(f, "pullAll");
+  assert.deepEqual(asked, [{ characters: 4, worldbooks: 2 }]);
+  const statuses = result.results.map((entry) => [entry.entityType, entry.managerId ?? entry.displayName, entry.status]);
+  assert.deepEqual(statuses.filter(([type]) => type === "worldbook"), [["worldbook", "book", "pulled"], ["worldbook", "Taken", "skipped"]]);
+  assert.deepEqual(statuses.filter(([type]) => type === "character").map(([, id, status]) => `${id}:${status}`).sort(),
+    ["Uses Taken:skipped", "a:pulled", "b:pulled", "d:pulled"]);
+  assert.match(outcome(result)["Uses Taken"].message, /Its WorldBook "Taken" is not in SillyTavern/);
+  assert.match(outcome(result).Taken.message, /already named "Taken"; Pull it individually/);
+
+  const reads = f.calls.manager.filter((call) => call.startsWith("GET ") && call !== "GET manifest" && !call.endsWith("/avatar"));
+  assert.deepEqual([...reads].sort(), ["GET characters/a", "GET characters/b", "GET characters/c", "GET characters/d",
+    "GET worldbooks/book", "GET worldbooks/taken"], "one Manager read per entity");
+
+  const { bindings } = await f.store.read();
+  for (const id of ["a", "b", "d"]) assert.equal(bindings[`character:${id}`].baseHash, f.remotes.get(`character:${id}`).contentHash);
+  assert.equal(bindings["worldbook:book"].baseHash, f.remotes.get("worldbook:book").contentHash);
+  assert.equal(bindings["worldbook:taken"], undefined);
+  const bookLocal = bindings["worldbook:book"].localId;
+  assert.equal(f.locals.get(`character:${bindings["character:a"].localId}`).rawCard.data.extensions.world, decodeURIComponent(bookLocal));
+  assert.equal(await f.stAvatars.get(bindings["character:d"].localId).text(), "manager picture");
+  assert.equal(f.calls.writes.some((write) => write === "worldbook:Taken" || write === "character:Bound.png"), false);
+  assert.deepEqual(bindings["character:m1"], { managerId: "m1", localId: "Bound.png", baseHash: null });
+  assert.ok(result.frontendChanges.every((change) => change.created));
+  assert.equal(result.frontendChanges.length, 4);
+});
+
+test("Pull All leaves a bound ST copy that reappeared after Refresh alone; a declined Pull All writes nothing", async () => {
+  const f = fixture();
+  f.remote("character", "m2", canonical("character", charNamed("Back")));
+  f.bind("character", "m2", "Back.png");
+  const discovery = f.discovery();
+  const declined = await runAll(f, "pullAll", { answer: false, discovery });
+  assert.equal(declined.result.cancelled, true);
+  assert.deepEqual(f.calls.creates, []);
+
+  f.local("character", "Back.png", charNamed("Back, edited in ST"));
+  const { result } = await runAll(f, "pullAll", { discovery });
+  assert.equal(result.results[0].status, "skipped");
+  assert.match(result.results[0].message, /reappeared after Refresh/);
+  assert.deepEqual(f.calls.creates, []);
+  assert.deepEqual(f.calls.writes, []);
+});

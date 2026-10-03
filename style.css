@@ -18,6 +18,11 @@
   display: none;
 }
 
+/* ST's .menu_button sets display, which would override [hidden]. */
+#tavern_manager_sync .menu_button[hidden] {
+  display: none;
+}
+
 #tavern_manager_sync .tms-lists {
   display: grid;
   gap: 0.75rem;

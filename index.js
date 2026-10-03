@@ -1,5 +1,6 @@
 import { eventSource, event_types, getRequestHeaders } from "../../../../script.js";
 import { extension_settings, getContext } from "../../../extensions.js";
+import { tag_import_setting } from "../../../tags.js";
 import { uuidv4 } from "../../../utils.js";
 import { worldInfoCache, reloadEditor, updateWorldInfoList } from "../../../world-info.js";
 import { createMinimalSyncService } from "./minimal-service.js";
@@ -63,6 +64,9 @@ const discover = () =>
 let panel;
 let busy = false;
 let currentRows = [];
+// Push All and Pull All stop between entities when asked.
+let stopButton;
+let stopRequested = false;
 
 const field = (role) => panel.querySelector(`[data-role="${role}"]`);
 
@@ -74,7 +78,7 @@ function setBusy(value) {
   busy = value;
 
   for (const button of panel.querySelectorAll("button")) {
-    button.disabled = value;
+    button.disabled = value && button !== stopButton;
   }
 }
 
@@ -86,6 +90,62 @@ function button(label, action) {
   element.disabled = busy;
   element.addEventListener("click", action);
   return element;
+}
+
+// ST's own popup follows the theme and works the same in SillyTavern and
+// TauriTavern. Its content is built from elements, so names stay plain text.
+function popupContent(...lines) {
+  const content = document.createElement("div");
+  for (const line of lines) {
+    if (typeof line !== "string") {
+      content.append(line);
+      continue;
+    }
+    const paragraph = document.createElement("p");
+    paragraph.textContent = line;
+    content.append(paragraph);
+  }
+  return content;
+}
+
+async function confirmPopup(content, okButton) {
+  const { callGenericPopup, POPUP_TYPE, POPUP_RESULT } = getContext();
+  if (typeof callGenericPopup !== "function") {
+    throw new Error("SillyTavern's confirmation popup is unavailable.");
+  }
+  const answer = await callGenericPopup(content, POPUP_TYPE.CONFIRM, "", { okButton, cancelButton: "Cancel" });
+  return answer === POPUP_RESULT.AFFIRMATIVE;
+}
+
+const typeLabel = (entityType) => entityType === "character" ? "Character" : "WorldBook";
+
+// Manager is the canonical library, so every Push is confirmed first: a row
+// Manager already has is overwritten, any other becomes a new Manager entity.
+async function confirmPush(row) {
+  if (busy) return;
+  const type = typeLabel(row.entityType);
+  const overwrite = Boolean(row.managerId);
+  const lines = [overwrite
+    ? `Push ${type} "${row.displayName}"? Manager's copy will be replaced with the SillyTavern version` +
+      `${row.entityType === "character" ? ", avatar included" : ""}.`
+    : `Push ${type} "${row.displayName}" to Manager as a new ${type}?`];
+  if (row.entityType === "character") {
+    lines.push("If its linked WorldBook is not in Manager yet, that WorldBook is pushed too.");
+  }
+  try {
+    if (!(await confirmPopup(popupContent(...lines), "Push"))) {
+      message("Push cancelled.");
+      return;
+    }
+  } catch (error) {
+    message(error.message);
+    return;
+  }
+  return run("push", {
+    entityType: row.entityType,
+    localId: row.localId,
+    ...(overwrite ? { confirmOverwrite: true } : {}),
+  });
 }
 
 function renderRows(rows) {
@@ -134,14 +194,7 @@ function renderRows(rows) {
     element.append(text);
 
     if (row.localId && row.status !== "error") {
-      element.append(
-        button("Push", () =>
-          run("push", {
-            entityType: row.entityType,
-            localId: row.localId,
-          }),
-        ),
-      );
+      element.append(button("Push", () => confirmPush(row)));
     }
 
     if (row.managerId) {
@@ -219,18 +272,141 @@ function chooseWorldbook(details) {
 }
 
 function confirmManagerOverwrite(action) {
-  if (typeof globalThis.confirm !== "function") {
-    message(
-      "Push cancelled because the overwrite confirmation dialog is unavailable.",
-    );
-    return false;
-  }
-
   const label = action === "sync-all" ? "Sync All" : "Push";
-
-  return globalThis.confirm(
-    `${label} will overwrite existing Manager content with the SillyTavern version. Continue?`,
+  return confirmPopup(
+    popupContent(`${label} will overwrite existing Manager content with the SillyTavern version. Continue?`),
+    label,
   );
+}
+
+const countLabel = (count, entityType) => `${count} ${typeLabel(entityType)}${count === 1 ? "" : "s"}`;
+
+function countText({ characters, worldbooks }) {
+  return [characters && countLabel(characters, "character"), worldbooks && countLabel(worldbooks, "worldbook")]
+    .filter(Boolean).join(" and ");
+}
+
+async function confirmPushAll(counts) {
+  const confirmed = await confirmPopup(popupContent(
+    `Push All sends ${countText(counts)} that exist only in SillyTavern to Manager.`,
+    "Each becomes a new Manager entity; nothing already in Manager is changed.",
+  ), "Push All");
+  return confirmed ? {} : null;
+}
+
+// ST would ask about tags once per created Character; a batch asks once.
+function tagImportChoice() {
+  const label = document.createElement("label");
+  label.textContent = "Tags of the new Characters: ";
+  const select = document.createElement("select");
+  select.className = "text_pole";
+  for (const [value, text] of [
+    [tag_import_setting.ALL, "Import all"],
+    [tag_import_setting.ONLY_EXISTING, "Import existing tags only"],
+    [tag_import_setting.NONE, "Import none"],
+  ]) {
+    const option = document.createElement("option");
+    option.value = String(value);
+    option.textContent = text;
+    select.append(option);
+  }
+  select.value = String(tag_import_setting.ALL);
+  label.append(select);
+  return { label, select };
+}
+
+async function confirmPullAll(counts) {
+  const lines = [
+    `Pull All copies ${countText(counts)} that exist only in Manager into SillyTavern.`,
+    "Nothing already in SillyTavern is changed. A WorldBook whose name SillyTavern already uses is skipped, " +
+      "with the Characters that use it; Pull those one by one.",
+  ];
+  const tags = counts.characters && getContext().powerUserSettings?.tag_import_setting === tag_import_setting.ASK
+    ? tagImportChoice()
+    : null;
+  if (tags) lines.push(tags.label);
+  if (!(await confirmPopup(popupContent(...lines), "Pull All"))) return null;
+  // Without a choice here, ST applies its own tag import setting.
+  return { importSetting: tags ? Number(tags.select.value) : null };
+}
+
+const batches = {
+  "push-all": { label: "Push All", done: "pushed", nothing: "nothing exists only in SillyTavern.",
+    start: (options) => service.pushAll(options), confirm: confirmPushAll },
+  "pull-all": { label: "Pull All", done: "pulled", nothing: "nothing exists only in Manager.",
+    start: (options) => service.pullAll(options), confirm: confirmPullAll },
+};
+
+// At most ten entries per kind, so a long batch still fits the message line.
+function listOutcomes(results, status) {
+  const entries = results.filter((entry) => entry.status === status)
+    .map((entry) => `${entry.displayName}: ${entry.message}`);
+  return entries.length > 10 ? [...entries.slice(0, 10), `and ${entries.length - 10} more.`] : entries;
+}
+
+function batchSummary(batch, result, uiError) {
+  const count = (status) => result.results.filter((entry) => entry.status === status).length;
+  const total = result.characters + result.worldbooks;
+  const parts = [`${batch.label}: ${count(batch.done)} ${batch.done}, ${count("skipped")} skipped, ` +
+    `${count("failed")} failed${result.cancelled ? `; stopped after ${result.results.length} of ${total}` : ""}.`];
+  if (result.error) parts.push(result.error);
+  const failed = listOutcomes(result.results, "failed");
+  if (failed.length) parts.push(`Failed: ${failed.join(" ")}`);
+  const skipped = listOutcomes(result.results, "skipped");
+  if (skipped.length) parts.push(`Skipped: ${skipped.join(" ")}`);
+  // Avatar problems do not undo verified content; they are reported here.
+  const warnings = result.results.flatMap((entry) => entry.warnings ?? []);
+  if (warnings.length) parts.push(warnings.join("; "));
+  if (uiError) parts.push(`ST UI refresh failed: ${uiError}`);
+  return parts.join(" ");
+}
+
+async function runBatch(action) {
+  if (busy) return;
+  const batch = batches[action];
+  setBusy(true);
+  stopRequested = false;
+  let importSetting = null;
+
+  try {
+    const result = await batch.start({
+      discovery: await discover(),
+      adapter,
+      confirm: async (counts) => {
+        const answer = await batch.confirm(counts);
+        if (!answer) return false;
+        importSetting = answer.importSetting ?? null;
+        stopButton.hidden = false;
+        message(`${batch.label}: starting…`);
+        return true;
+      },
+      onProgress: ({ done, total }) => message(`${batch.label}: ${done}/${total}…`),
+      isCancelled: () => stopRequested,
+    });
+
+    if (!result.characters && !result.worldbooks) {
+      message(`${batch.label}: ${batch.nothing}`);
+      return;
+    }
+    if (result.cancelled && !result.results.length) {
+      message(`${batch.label} cancelled.`);
+      return;
+    }
+
+    let uiError = null;
+    try {
+      await reconciler.reconcileAll(result.frontendChanges, { importSetting });
+    } catch (error) {
+      uiError = error.message;
+    }
+    await refresh();
+    message(batchSummary(batch, result, uiError));
+  } catch (error) {
+    message(error.message);
+  } finally {
+    stopButton.hidden = true;
+    setBusy(false);
+  }
 }
 
 async function run(action, source = {}) {
@@ -271,7 +447,10 @@ async function run(action, source = {}) {
           ["push", "sync-all"].includes(action) &&
           error.code === "overwrite_confirmation_required"
         ) {
-          if (!confirmManagerOverwrite(action)) return;
+          if (!(await confirmManagerOverwrite(action))) {
+            message(`${action === "sync-all" ? "Sync All" : "Push"} cancelled.`);
+            return;
+          }
 
           body = {
             ...body,
@@ -410,10 +589,23 @@ function registerPanel() {
 
   container.append(panel);
 
+  const pushAll = button("Push All", () => runBatch("push-all"));
+  pushAll.title = "Push every Character and WorldBook that exists only in SillyTavern";
+  const pullAll = button("Pull All", () => runBatch("pull-all"));
+  pullAll.title = "Pull every Character and WorldBook that exists only in Manager";
+  stopButton = button("Stop", () => {
+    stopRequested = true;
+    message("Stopping after the entities in progress…");
+  });
+  stopButton.hidden = true;
+
   field("controls").append(
     button("Save", () => run("save")),
     button("Refresh", () => run("refresh")),
     button("Sync All", () => run("sync-all")),
+    pushAll,
+    pullAll,
+    stopButton,
   );
 
   field("search").addEventListener("input", () =>

@@ -5,9 +5,10 @@ A SillyTavern extension for bidirectional synchronization of Characters and Worl
 ## Features
 
 - Bidirectional Character and WorldBook sync
-- Push local SillyTavern entities to Tavern Manager
+- Push local SillyTavern entities to Tavern Manager; every Push asks for confirmation first, since Manager is the canonical library
 - Pull Manager entities into SillyTavern
 - Sync All with conflict/overwrite handling
+- **Push All** and **Pull All** copy every Character and WorldBook that exists on one side only, after one confirmation, with progress and stop.
 - Character avatars on Push and Pull (Push replaces the Manager avatar with SillyTavern's)
 - A creator-notes line under each Character, so same-name Characters can be told apart
 - Display-name and creator-notes search for Push/Pull lists
@@ -61,7 +62,7 @@ The Vite development port `5173` is only for the Manager web UI and should not b
 3. Enter the Manager endpoint.
 4. Click **Save**.
 5. Click **Refresh** to discover Characters and WorldBooks.
-6. Use **Push**, **Pull**, or **Sync All**.
+6. Use **Push**, **Pull**, **Sync All**, **Push All**, or **Pull All**.
 
 ## Compatibility
 
@@ -84,4 +85,4 @@ npm test
 
 Some tests check the extension against SillyTavern's own code. They use the SillyTavern install this extension lives in, or `ST_SYNC_ST_ROOT`, and are skipped when neither is found.
 
-`sync-core/` is copied verbatim from Tavern Manager (`npm run sync-core:export` there); do not edit it here.
+`sync-core/` is copied verbatim from Tavern Manager (`npm run sync-core:export` there). Do not edit it here!

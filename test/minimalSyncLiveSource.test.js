@@ -18,9 +18,12 @@ class Element {
   descendants() { return this.children.flatMap(c => [c, ...c.descendants()]); }
   querySelector(selector) { const role = selector.match(/data-role="([^"]+)"/)?.[1]; return this.descendants().find(c => c.dataset.role === role); }
   querySelectorAll(selector) { return this.descendants().filter(c => c.tagName === selector); }
-  click() { return this.disabled ? undefined : this.listeners.click?.({ target: this }); }
+  click() { return this.disabled || this.hidden ? undefined : this.listeners.click?.({ target: this }); }
   input(value) { this.value = value; return this.listeners.input?.({ target: this }); }
+  text() { return [this.textContent, ...this.children.map(child => child.text())].filter(Boolean).join(" "); }
 }
+
+const tagImportSetting = { ASK: 1, NONE: 2, ALL: 3, ONLY_EXISTING: 4 };
 
 async function uiFixture() {
   const container = new Element("div"); const calls = []; const reconciled = []; const events = []; const confirmations = [];
@@ -28,12 +31,31 @@ async function uiFixture() {
   let nextRows = [];
   let onAction = () => ({ status: "pulled", frontendChanges: [] });
   let confirmation = true;
+  let tagSetting = tagImportSetting.ASK;
+  const batchesSeen = [];
+  // A batch's service asks the popup through `confirm` before it changes anything.
+  let onBatch = async (path, { confirm, onProgress }) => {
+    const counts = { characters: 2, worldbooks: 1 };
+    if (!(await confirm(counts))) return { ...counts, cancelled: true, results: [], frontendChanges: [] };
+    onProgress({ done: 3, total: 3 });
+    return { ...counts, cancelled: false, results: [
+      { status: path === "/push-all" ? "pushed" : "pulled", entityType: "worldbook", displayName: "Lore" },
+      { status: "skipped", entityType: "character", displayName: "Kept", message: "Pull it individually." },
+      { status: "failed", entityType: "character", displayName: "Broken", message: "HTTP 500." },
+    ], frontendChanges: [{ entityType: "worldbook", localId: "Lore", created: true }] };
+  };
   let emitOnSave = true;
   const adapter = { synthetic: "adapter" };
   const record = (path, { adapter: given, ...body }) => {
     assert.equal(given, adapter, "every content action uses the native ST adapter");
     calls.push({ path, body });
     return onAction(path, body);
+  };
+  const recordBatch = (path, { adapter: given, ...body }) => {
+    assert.equal(given, adapter, "every batch uses the native ST adapter");
+    calls.push({ path, body });
+    batchesSeen.push(body);
+    return onBatch(path, body);
   };
   const service = {
     getConfiguration: async () => ({ endpoint: "http://synthetic.test/api/sync/v1", configured: true }),
@@ -42,6 +64,8 @@ async function uiFixture() {
     push: async (args) => record("/push", args),
     pull: async (args) => record("/pull", args),
     syncAll: async (args) => record("/sync-all", args),
+    pushAll: async (args) => recordBatch("/push-all", args),
+    pullAll: async (args) => recordBatch("/pull-all", args),
     renameLocal: async (body) => { calls.push({ path: "/rename", body }); return {}; },
   };
   const source = (await readFile(`${extensionRoot}/index.js`, "utf8")).replace(/^import [^;]*;\n/gm, "");
@@ -52,12 +76,24 @@ async function uiFixture() {
       removeListener: (name, fn) => listeners.set(name, (listeners.get(name) ?? []).filter(x => x !== fn)),
     },
     event_types: { CHARACTER_RENAMED: "rename", SETTINGS_UPDATED: "settings_updated" },
-    getRequestHeaders: () => ({ "X-CSRF-Token": "synthetic" }), getContext: () => ({}), uuidv4: () => "uuid",
+    getRequestHeaders: () => ({ "X-CSRF-Token": "synthetic" }), uuidv4: () => "uuid",
+    getContext: () => ({
+      POPUP_TYPE: { CONFIRM: 2 }, POPUP_RESULT: { AFFIRMATIVE: 1, NEGATIVE: 0 },
+      powerUserSettings: { tag_import_setting: tagSetting },
+      callGenericPopup: async (content, type, input, options) => {
+        assert.equal(type, 2);
+        confirmations.push({ text: content.text(), okButton: options.okButton, content });
+        return (typeof confirmation === "function" ? confirmation(content) : confirmation) ? 1 : 0;
+      },
+    }),
+    tag_import_setting: tagImportSetting,
     extension_settings: { synthetic: true },
     saveSettings: async () => { if (emitOnSave) for (const fn of listeners.get("settings_updated") ?? []) await fn(); },
     worldInfoCache: new Map(), reloadEditor() {}, updateWorldInfoList() {}, encodeLocalId: encodeURIComponent,
-    confirm: text => { confirmations.push(text); return confirmation; },
-    createSillyTavernFrontendReconciler: () => ({ reconcile: async change => { reconciled.push(change); } }),
+    createSillyTavernFrontendReconciler: () => ({
+      reconcile: async change => { reconciled.push(change); },
+      reconcileAll: async (changes, options) => { reconciled.push({ batch: changes, ...options }); },
+    }),
     discoverSillyTavern: async () => ({ characters: [], worldbooks: [] }),
     createFileSidecarStore: (options) => { wiring.store = options; return { synthetic: "store" }; },
     createNativeStGateway: (options) => { wiring.gateway = options; return { synthetic: "gateway" }; },
@@ -67,9 +103,10 @@ async function uiFixture() {
   vm.runInNewContext(source, context);
   await Promise.resolve();
   const panel = container.children[0];
-  return { panel, calls, reconciled, events, confirmations, wiring, context, listeners,
-    rows(value) { nextRows = value; }, action(fn) { onAction = fn; },
+  return { panel, calls, reconciled, events, confirmations, wiring, context, listeners, batchesSeen,
+    rows(value) { nextRows = value; }, action(fn) { onAction = fn; }, batch(fn) { onBatch = fn; },
     confirm(value) { confirmation = value; }, emitOnSave(value) { emitOnSave = value; },
+    tagSetting(value) { tagSetting = value; },
     field(role) { return panel.querySelector(`[data-role="${role}"]`); },
     button(label) { return panel.querySelectorAll("button").find(b => b.textContent === label); },
   };
@@ -200,9 +237,26 @@ test("real UI handlers send only each row's source; Manager-only Pull and ST-onl
   ]);
 });
 
-test("Push retries only after the user confirms an existing Manager overwrite", async () => {
+test("every Push is confirmed first; a row Manager has is sent as one confirmed overwrite", async () => {
   const ui = await uiFixture();
-  ui.rows([{ entityType: "character", localId: "local", managerId: "remote", displayName: "Bound", status: "st_changed" }]);
+  ui.rows([{ entityType: "character", localId: "local", managerId: "remote", displayName: "Bound <b>", status: "st_changed" }]);
+  await ui.button("Refresh").click();
+  ui.action(() => ({ status: "pushed", frontendChanges: [] }));
+  await ui.button("Push").click();
+  const requests = ui.calls.filter(call => call.path === "/push").map(call => call.body);
+  assert.deepEqual(JSON.parse(JSON.stringify(requests)), [
+    { entityType: "character", localId: "local", confirmOverwrite: true },
+  ]);
+  assert.equal(ui.confirmations.length, 1);
+  assert.equal(ui.confirmations[0].okButton, "Push");
+  // Names are text, never markup.
+  assert.match(ui.confirmations[0].text, /Push Character "Bound <b>"\? Manager's copy will be replaced .*avatar included/);
+  assert.match(ui.confirmations[0].text, /linked WorldBook is not in Manager yet, that WorldBook is pushed too/);
+});
+
+test("an ST-only Push asks to create, and asks again only if Manager unexpectedly needs an overwrite", async () => {
+  const ui = await uiFixture();
+  ui.rows([{ entityType: "worldbook", localId: "Lore", managerId: null, displayName: "Lore", status: "st_only" }]);
   await ui.button("Refresh").click();
   let pushes = 0;
   ui.action((path) => {
@@ -214,21 +268,24 @@ test("Push retries only after the user confirms an existing Manager overwrite", 
   await ui.button("Push").click();
   const requests = ui.calls.filter(call => call.path === "/push").map(call => call.body);
   assert.deepEqual(JSON.parse(JSON.stringify(requests)), [
-    { entityType: "character", localId: "local" },
-    { entityType: "character", localId: "local", confirmOverwrite: true },
+    { entityType: "worldbook", localId: "Lore" },
+    { entityType: "worldbook", localId: "Lore", confirmOverwrite: true },
   ]);
-  assert.equal(ui.confirmations.length, 1);
+  assert.deepEqual(ui.confirmations.map(c => c.text), [
+    'Push WorldBook "Lore" to Manager as a new WorldBook?',
+    "Push will overwrite existing Manager content with the SillyTavern version. Continue?",
+  ]);
 });
 
-test("Push cancellation sends no confirmed overwrite request", async () => {
-  const ui = await uiFixture(); ui.confirm(false);
-  ui.rows([{ entityType: "character", localId: "local", managerId: "remote", displayName: "Bound", status: "st_changed" }]);
-  await ui.button("Refresh").click();
-  ui.action(() => { throw Object.assign(new Error("confirmation needed"), { code: "overwrite_confirmation_required" }); });
-  await ui.button("Push").click();
-  const requests = ui.calls.filter(call => call.path === "/push");
-  assert.equal(requests.length, 1);
-  assert.equal(Object.hasOwn(requests[0].body, "confirmOverwrite"), false);
+test("declining a Push confirmation sends nothing", async () => {
+  for (const [status, managerId] of [["st_only", null], ["st_changed", "remote"]]) {
+    const ui = await uiFixture(); ui.confirm(false);
+    ui.rows([{ entityType: "character", localId: "local", managerId, displayName: "Bound", status }]);
+    await ui.button("Refresh").click();
+    await ui.button("Push").click();
+    assert.equal(ui.calls.filter(call => call.path === "/push").length, 0);
+    assert.equal(ui.field("message").textContent, "Push cancelled.");
+  }
 });
 
 test("Sync All retries only after one overwrite confirmation", async () => {
@@ -281,4 +338,86 @@ test("WB choice resumes the original Manager source; Cancel does not send a seco
       assert.equal(Object.hasOwn(last, "localId"), false);
     }
   }
+});
+
+test("Push All asks once with the counts, then reconciles once and refreshes", async () => {
+  const ui = await uiFixture();
+  await ui.button("Push All").click();
+  const [batch] = ui.batchesSeen;
+  assert.deepEqual(Object.keys(batch).sort(), ["confirm", "discovery", "isCancelled", "onProgress"]);
+  assert.equal(ui.confirmations.length, 1);
+  assert.equal(ui.confirmations[0].okButton, "Push All");
+  assert.match(ui.confirmations[0].text, /Push All sends 2 Characters and 1 WorldBook that exist only in SillyTavern/);
+  assert.match(ui.confirmations[0].text, /nothing already in Manager is changed/);
+  assert.deepEqual(JSON.parse(JSON.stringify(ui.reconciled)), [
+    { batch: [{ entityType: "worldbook", localId: "Lore", created: true }], importSetting: null },
+  ]);
+  assert.equal(ui.calls.at(-1).path, "/refresh");
+  const text = ui.field("message").textContent;
+  assert.match(text, /^Push All: 1 pushed, 1 skipped, 1 failed\./);
+  assert.match(text, /Failed: Broken: HTTP 500\./);
+  assert.match(text, /Skipped: Kept: Pull it individually\./);
+});
+
+test("declining Push All or Pull All changes nothing", async () => {
+  for (const label of ["Push All", "Pull All"]) {
+    const ui = await uiFixture(); ui.confirm(false);
+    await ui.button(label).click();
+    assert.equal(ui.reconciled.length, 0);
+    assert.equal(ui.field("message").textContent, `${label} cancelled.`);
+    assert.equal(ui.calls.some(call => call.path === "/refresh"), false);
+  }
+});
+
+test("a batch with nothing to copy says so without asking", async () => {
+  const ui = await uiFixture();
+  ui.batch(async () => ({ characters: 0, worldbooks: 0, results: [], frontendChanges: [] }));
+  await ui.button("Pull All").click();
+  assert.equal(ui.confirmations.length, 0);
+  assert.equal(ui.field("message").textContent, "Pull All: nothing exists only in Manager.");
+});
+
+test("Pull All asks for tags once when ST would ask per Character, and passes that choice on", async () => {
+  const ui = await uiFixture();
+  ui.confirm((content) => {
+    const select = content.descendants().find(child => child.tagName === "select");
+    select.value = "4"; // Import existing tags only
+    return true;
+  });
+  await ui.button("Pull All").click();
+  assert.match(ui.confirmations[0].text, /Pull All copies 2 Characters and 1 WorldBook that exist only in Manager/);
+  assert.match(ui.confirmations[0].text, /skipped, with the Characters that use it/);
+  assert.match(ui.confirmations[0].text, /Tags of the new Characters/);
+  assert.equal(ui.reconciled[0].importSetting, 4);
+  assert.match(ui.field("message").textContent, /^Pull All: 1 pulled/);
+
+  const decided = await uiFixture(); decided.tagSetting(3); // ST already imports all tags
+  await decided.button("Pull All").click();
+  assert.doesNotMatch(decided.confirmations[0].text, /Tags of the new Characters/);
+  assert.equal(decided.reconciled[0].importSetting, null);
+});
+
+test("Stop is shown and usable only while a batch runs, and asks it to stop between entities", async () => {
+  const ui = await uiFixture();
+  assert.equal(ui.button("Stop").hidden, true);
+  let release;
+  const progress = [];
+  ui.batch(async (path, { confirm, onProgress, isCancelled }) => {
+    await confirm({ characters: 1, worldbooks: 0 });
+    onProgress({ done: 0, total: 1 });
+    progress.push(ui.field("message").textContent);
+    await new Promise(resolve => { release = resolve; });
+    return { characters: 1, worldbooks: 0, cancelled: isCancelled(), results: [], frontendChanges: [] };
+  });
+  const pending = ui.button("Push All").click();
+  await new Promise(resolve => setImmediate(resolve));
+  assert.equal(ui.button("Stop").hidden, false);
+  assert.equal(ui.button("Stop").disabled, false);
+  assert.equal(ui.button("Pull All").disabled, true);
+  await ui.button("Stop").click();
+  release(); await pending;
+  assert.deepEqual(progress, ["Push All: 0/1…"]);
+  assert.equal(ui.field("message").textContent, "Push All cancelled.");
+  assert.equal(ui.button("Stop").hidden, true);
+  assert.equal(ui.button("Pull All").disabled, false);
 });

@@ -109,11 +109,58 @@ export function createSillyTavernFrontendReconciler({
     await reloadWorldInfoEditor(fileId, true);
   }
 
+  // A batch refreshes ST's lists once rather than once per entity. Pushed
+  // Characters only gained their embedded id; created ones get their tags with
+  // the setting chosen for the whole batch, so ST asks nothing per Character.
+  async function reconcileAll(changes, importSetting) {
+    const books = changes.filter((change) => change.entityType === "worldbook");
+    const characters = changes.filter((change) => change.entityType === "character");
+    if (books.length + characters.length !== changes.length) {
+      throw new FrontendReconciliationError("SillyTavern reconciliation entityType is invalid.");
+    }
+    for (const { localId } of changes) assertNonEmptyString(localId, "Batch localId");
+    const errors = [];
+
+    if (books.length) {
+      if (!worldInfoCache || typeof worldInfoCache.delete !== "function" || typeof updateWorldInfoList !== "function"
+        || typeof reloadWorldInfoEditor !== "function") {
+        throw new FrontendReconciliationError("SillyTavern World Info reconciliation APIs are unavailable.");
+      }
+      for (const { localId } of books) worldInfoCache.delete(decodeLocalId(localId));
+      await updateWorldInfoList();
+      // Only a book the editor already shows is reloaded.
+      for (const { localId } of books) await reloadWorldInfoEditor(decodeLocalId(localId), false);
+    }
+
+    if (characters.length) {
+      if (typeof getContext()?.getCharacters !== "function") {
+        throw new FrontendReconciliationError("SillyTavern Character list refresh is unavailable.");
+      }
+      // ST reselects the open Character itself, through its own editor path.
+      await getContext().getCharacters();
+      const context = getContext();
+      for (const { localId } of characters.filter((change) => change.created)) {
+        const avatar = decodeLocalId(localId);
+        const character = context.characters?.find((candidate) => candidate.avatar === avatar);
+        if (!character) {
+          errors.push(`Created Character ${avatar} is missing after list refresh.`);
+          continue;
+        }
+        await context.importTags(character, { importSetting });
+      }
+    }
+
+    if (errors.length) throw new FrontendReconciliationError(errors.join(" "));
+  }
+
   return Object.freeze({
     async reconcile({ entityType, localId, created = false, avatarChanged = false } = {}) {
       if (entityType === "character") return reconcileCharacter(localId, created, avatarChanged);
       if (entityType === "worldbook") return reconcileWorldbook(localId);
       throw new FrontendReconciliationError("SillyTavern reconciliation entityType is invalid.");
+    },
+    async reconcileAll(changes = [], { importSetting = null } = {}) {
+      return reconcileAll(changes, importSetting);
     },
   });
 }

@@ -108,3 +108,51 @@ test("a Pull that changed the avatar reloads ST's cached images before the Chara
   await reconciler.reconcile({ entityType: "character", localId: encodeURIComponent("Hero 1.png") });
   assert.deepEqual(calls, ["getOneCharacter"], "no avatar change, no image reload");
 });
+
+test("a batch refreshes ST's lists once and imports each created Character's tags with the batch's choice", async () => {
+  const calls = [];
+  const cache = new Map([["New Lore", { stale: true }], ["Other", { preserved: true }]]);
+  const context = {
+    characters: [{ avatar: "Pushed.png" }],
+    async getCharacters() { calls.push("list"); this.characters.push({ avatar: "A.png" }, { avatar: "B #1.png" }); },
+    async getOneCharacter() { throw new Error("A batch reloads the list once instead"); },
+    async importTags(character, options) { calls.push(["tags", character.avatar, options.importSetting]); },
+    eventSource: { async emit() { throw new Error("A batch emits no per-Character edit"); } },
+  };
+  const reconciler = createSillyTavernFrontendReconciler({
+    getContext: () => context,
+    worldInfoCache: cache,
+    async updateWorldInfoList() { calls.push("world list"); },
+    async reloadWorldInfoEditor(file, loadIfNotSelected) { calls.push(["editor", file, loadIfNotSelected]); },
+  });
+  await reconciler.reconcileAll([
+    { entityType: "worldbook", localId: encodeURIComponent("New Lore"), created: true },
+    { entityType: "character", localId: "A.png", created: true },
+    { entityType: "character", localId: encodeURIComponent("B #1.png"), created: true },
+    { entityType: "character", localId: "Pushed.png", created: false },
+  ], { importSetting: 4 });
+  assert.deepEqual(calls, [
+    "world list",
+    ["editor", "New Lore", false],
+    "list",
+    ["tags", "A.png", 4],
+    ["tags", "B #1.png", 4],
+  ]);
+  assert.deepEqual([...cache.keys()], ["Other"]);
+});
+
+test("a batch reports a created Character missing after the refresh, after importing the others' tags", async () => {
+  const calls = [];
+  const context = {
+    characters: [],
+    async getCharacters() { this.characters = [{ avatar: "Here.png" }]; },
+    async importTags(character) { calls.push(character.avatar); },
+  };
+  const reconciler = createSillyTavernFrontendReconciler({ getContext: () => context });
+  await assert.rejects(reconciler.reconcileAll([
+    { entityType: "character", localId: "Gone.png", created: true },
+    { entityType: "character", localId: "Here.png", created: true },
+  ]), /Created Character Gone\.png is missing/);
+  assert.deepEqual(calls, ["Here.png"]);
+  await reconciler.reconcileAll([]);
+});

@@ -306,32 +306,55 @@ export function createMinimalSillyTavernAdapter({
     return binding?.managerId ?? null;
   }
 
+  function readCharacter(current) {
+    if (!isPlainObject(current?.rawCard) || typeof current.avatarFileName !== "string") {
+      throw new AdapterError("SillyTavern character reread is invalid.");
+    }
+    return current;
+  }
+
+  // Content that cannot be projected is reported, not thrown: Pull can still
+  // overwrite it, while Push and verification refuse it.
+  function characterState(current, localId, bindings) {
+    const localWorldReference = readCharacterWorldReference(current.rawCard);
+    const linkedWorldBookLocalId = localWorldReference ? encodeLocalId(localWorldReference) : null;
+    try {
+      const character = normalizeSillyTavernCharacter(
+        current.rawCard,
+        localId,
+        linkedWorldBookLocalId ? managerWorldBookId(bindings, linkedWorldBookLocalId) : null,
+      );
+      return {
+        entityType: "character",
+        localId,
+        canonical: createCanonicalCharacterProjection(character),
+        linkedWorldBookLocalId,
+      };
+    } catch (error) {
+      return { entityType: "character", localId, linkedWorldBookLocalId, error: error.message };
+    }
+  }
+
+  // Writes only data.extensions.tavern_manager; the merge endpoint preserves
+  // every other field.
+  function managerIdUpdate(current, managerId) {
+    const marker = { [EMBEDDED_MANAGER_KEY]: { id: managerId } };
+    return isPlainObject(current.rawCard.data)
+      ? { avatar: current.avatarFileName, data: { extensions: marker } }
+      : { avatar: current.avatarFileName, extensions: marker };
+  }
+
+  function assertManagerId(managerId) {
+    if (typeof managerId !== "string" || !managerId) {
+      throw new AdapterError("Manager id to embed must be a non-empty string.");
+    }
+  }
+
   async function refresh({ entityType, localId, bindings = {} } = {}) {
     const current = await readLocal({ entityType, localId });
 
     if (entityType === "character") {
-      if (!isPlainObject(current?.rawCard) || typeof current.avatarFileName !== "string") {
-        throw new AdapterError("SillyTavern character reread is invalid.");
-      }
-      const localWorldReference = readCharacterWorldReference(current.rawCard);
-      const linkedWorldBookLocalId = localWorldReference ? encodeLocalId(localWorldReference) : null;
-      // Content that cannot be projected is reported, not thrown: Pull can
-      // still overwrite it, while Push and verification refuse it.
-      try {
-        const character = normalizeSillyTavernCharacter(
-          current.rawCard,
-          localId,
-          linkedWorldBookLocalId ? managerWorldBookId(bindings, linkedWorldBookLocalId) : null,
-        );
-        return {
-          entityType,
-          localId,
-          canonical: createCanonicalCharacterProjection(character),
-          linkedWorldBookLocalId,
-        };
-      } catch (error) {
-        return { entityType, localId, linkedWorldBookLocalId, error: error.message };
-      }
+      return characterState(readCharacter(current), localId, bindings);
     }
 
     if (entityType === "worldbook") {
@@ -426,26 +449,30 @@ export function createMinimalSillyTavernAdapter({
     throw new AdapterError("Sync entity type is invalid.");
   }
 
-  // Writes only data.extensions.tavern_manager; the merge endpoint preserves
-  // every other field. Returns whether a write was needed.
+  // Returns whether a write was needed.
   async function stampManagerId({ localId, managerId } = {}) {
-    if (typeof managerId !== "string" || !managerId) {
-      throw new AdapterError("Manager id to embed must be a non-empty string.");
-    }
-    const current = await readLocal({ entityType: "character", localId });
-    if (!isPlainObject(current?.rawCard) || typeof current.avatarFileName !== "string") {
-      throw new AdapterError("SillyTavern character reread is invalid.");
-    }
+    assertManagerId(managerId);
+    const current = readCharacter(await readLocal({ entityType: "character", localId }));
     if (readEmbeddedManagerId(current.rawCard) === managerId) return false;
-
-    const marker = { [EMBEDDED_MANAGER_KEY]: { id: managerId } };
-    await writeCharacter({
-      avatarFileName: current.avatarFileName,
-      update: isPlainObject(current.rawCard.data)
-        ? { avatar: current.avatarFileName, data: { extensions: marker } }
-        : { avatar: current.avatarFileName, extensions: marker },
-    });
+    await writeCharacter({ avatarFileName: current.avatarFileName, update: managerIdUpdate(current, managerId) });
     return true;
+  }
+
+  // One reread of a pushed Character both verifies it still has the pushed
+  // content and supplies the card the embedded id is merged into. A failed
+  // id write leaves the verified content; it is returned, not thrown.
+  async function verifyAndStamp({ localId, managerId, contentHash, bindings = {} } = {}) {
+    assertManagerId(managerId);
+    const current = readCharacter(await readLocal({ entityType: "character", localId }));
+    const reread = characterState(current, localId, bindings);
+    if (reread.error || hashCanonicalProjection(reread.canonical) !== contentHash) return { verified: false };
+    if (readEmbeddedManagerId(current.rawCard) === managerId) return { verified: true, stamped: false };
+    try {
+      await writeCharacter({ avatarFileName: current.avatarFileName, update: managerIdUpdate(current, managerId) });
+    } catch (error) {
+      return { verified: true, stamped: false, stampError: error };
+    }
+    return { verified: true, stamped: true };
   }
 
   // Avatars are image files beside the canonical content and never hashed.
@@ -459,5 +486,5 @@ export function createMinimalSillyTavernAdapter({
     await writeAvatarFile({ avatarFileName: decodeLocalId(localId), image });
   }
 
-  return Object.freeze({ refresh, writeExisting, create, stampManagerId, listWorldbooks, readAvatar, writeAvatar });
+  return Object.freeze({ refresh, writeExisting, create, stampManagerId, verifyAndStamp, listWorldbooks, readAvatar, writeAvatar });
 }
