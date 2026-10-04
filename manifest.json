@@ -5,8 +5,8 @@
   "optional": [],
   "js": "index.js",
   "css": "style.css",
-  "author": "Tavern Manager",
+  "author": "JL0952",
   "version": "0.3.0",
-  "homePage": "",
-  "description": "Refresh, Push, Pull, and Sync All for Characters and WorldBooks between SillyTavern and Tavern Manager."
+  "homePage": "https://github.com/JL0952/tavern-manager-sync",
+  "description": "Sync Characters, WorldBooks, presets, UI themes and global regex scripts between SillyTavern and Tavern Manager."
 }
