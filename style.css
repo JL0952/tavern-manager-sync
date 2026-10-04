@@ -18,28 +18,114 @@
   display: none;
 }
 
+#tavern_manager_sync .tms-endpoint {
+  gap: 0.5rem;
+  align-items: flex-end;
+}
+
+/* Tabs: one per kind of entry, underlined like a selected page. */
+#tavern_manager_sync .tms-tabs {
+  display: flex;
+  flex-wrap: wrap;
+  gap: 0.25rem 1rem;
+  border-bottom: 1px solid var(--SmartThemeBorderColor);
+}
+
+#tavern_manager_sync .tms-tab {
+  padding: 0.35rem 0.1rem;
+  color: inherit;
+  font: inherit;
+  background: none;
+  border: 0;
+  border-bottom: 2px solid transparent;
+  opacity: 0.7;
+  cursor: pointer;
+}
+
+#tavern_manager_sync .tms-tab-active {
+  border-bottom-color: var(--SmartThemeBodyColor);
+  font-weight: 600;
+  opacity: 1;
+}
+
+#tavern_manager_sync .tms-count {
+  margin-left: 0.35em;
+  font-size: 0.85em;
+  opacity: 0.7;
+}
+
+#tavern_manager_sync .tms-filters {
+  display: flex;
+  flex-wrap: wrap;
+  gap: 0.35rem;
+}
+
+#tavern_manager_sync .tms-chip {
+  padding: 0.15rem 0.6rem;
+  color: inherit;
+  font: inherit;
+  font-size: 0.9em;
+  background: none;
+  border: 1px solid var(--SmartThemeBorderColor);
+  border-radius: 999px;
+  cursor: pointer;
+}
+
+#tavern_manager_sync .tms-chip-active {
+  background-color: var(--SmartThemeBlurTintColor);
+  border-color: var(--SmartThemeBodyColor);
+  font-weight: 600;
+}
+
+#tavern_manager_sync .tms-tab:disabled,
+#tavern_manager_sync .tms-chip:disabled {
+  cursor: default;
+}
+
+/* Status badges: changes stand out, problems warn, settled entries recede. */
+#tavern_manager_sync .tms-badge {
+  display: inline-block;
+  margin-left: 0.5em;
+  padding: 0 0.45em;
+  font-size: 0.8em;
+  white-space: nowrap;
+  border: 1px solid var(--SmartThemeBorderColor);
+  border-radius: 999px;
+}
+
+#tavern_manager_sync .tms-badge-attention {
+  color: var(--SmartThemeQuoteColor);
+  border-color: var(--SmartThemeQuoteColor);
+}
+
+#tavern_manager_sync .tms-badge-problem {
+  color: var(--warning);
+  border-color: var(--warning);
+}
+
+#tavern_manager_sync .tms-badge-quiet {
+  opacity: 0.6;
+}
+
+/* The panel sits in a narrow column; a two-word button stays on one line. */
+#tavern_manager_sync .menu_button {
+  white-space: nowrap;
+}
+
 /* ST's .menu_button sets display, which would override [hidden]. */
 #tavern_manager_sync .menu_button[hidden] {
   display: none;
 }
 
-#tavern_manager_sync .tms-lists {
-  display: grid;
-  gap: 0.75rem;
-}
-
 #tavern_manager_sync .tms-list-group {
+  display: grid;
+  gap: 0.5rem;
   min-width: 0;
   padding: 0.5rem;
   color: inherit;
   background-color: var(--SmartThemeBlurTintColor);
   border: 1px solid var(--SmartThemeBorderColor);
   border-radius: 5px;
-}
-
-#tavern_manager_sync .tms-list-group h4 {
-  margin: 0 0 0.25rem;
-  color: var(--SmartThemeBodyColor);
 }
 
 #tavern_manager_sync .tms-entity-list {

@@ -1,6 +1,6 @@
 # Tavern Manager Sync
 
-A SillyTavern extension for bidirectional synchronization of Characters and WorldBooks with [Tavern Manager](https://github.com/JL0952/ST_manager).
+A SillyTavern extension for synchronizing Characters, WorldBooks, presets, UI themes, and global regex scripts with [Tavern Manager](https://github.com/JL0952/ST_manager).
 
 ## Features
 
@@ -9,6 +9,8 @@ A SillyTavern extension for bidirectional synchronization of Characters and Worl
 - Pull Manager entities into SillyTavern
 - Sync All with conflict/overwrite handling
 - **Push All** and **Pull All** copy every Character and WorldBook that exists on one side only, after one confirmation, with progress and stop.
+- Chat completion presets, UI themes and global regex scripts: Push and Pull them as files (regex scripts download for SillyTavern's Regex panel to import)
+- Presets are stored as SillyTavern saves them, including any reverse proxy address and password
 - Character avatars on Push and Pull (Push replaces the Manager avatar with SillyTavern's)
 - A creator-notes line under each Character, so same-name Characters can be told apart
 - Display-name and creator-notes search for Push/Pull lists
@@ -61,7 +63,7 @@ The Vite development port `5173` is only for the Manager web UI and should not b
 2. Open the Tavern Manager Sync extension in SillyTavern.
 3. Enter the Manager endpoint.
 4. Click **Save**.
-5. Click **Refresh** to discover Characters and WorldBooks.
+5. Click **Refresh**, then pick a tab: Characters, WorldBooks, Presets, Themes or Regex.
 6. Use **Push**, **Pull**, **Sync All**, **Push All**, or **Pull All**.
 
 ## Compatibility

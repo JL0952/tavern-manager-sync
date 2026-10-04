@@ -3,6 +3,7 @@ import { readdir, readFile } from "node:fs/promises";
 import vm from "node:vm";
 import test from "node:test";
 import { fileURLToPath } from "node:url";
+import { createSyncPanel } from "../panel.js";
 
 const extensionRoot = fileURLToPath(new URL("..", import.meta.url));
 
@@ -12,6 +13,7 @@ class Element {
   append(...children) { this.children.push(...children); }
   replaceChildren(...children) { this.children = children; }
   addEventListener(event, fn) { this.listeners[event] = fn; }
+  setAttribute(name, value) { this.attributes = { ...this.attributes, [name]: value }; }
   set innerHTML(html) { this.children = [...html.matchAll(/data-role="([^"]+)"/g)].map(([, role]) => {
     const child = new Element(role === "endpoint" || role === "search" ? "input" : "div"); child.dataset.role = role; return child;
   }); }
@@ -45,6 +47,31 @@ async function uiFixture() {
     ], frontendChanges: [{ entityType: "worldbook", localId: "Lore", created: true }] };
   };
   let emitOnSave = true;
+  // The file relay: rows per type, and what each action answers.
+  let relayRows = { presets: [], themes: [], regex: [] };
+  let relayFailure = null;
+  let onRelay = async (method, args) => {
+    if (method === "push") return { type: args.type, name: args.name, status: "pushed" };
+    if (method === "pull") {
+      return args.type === "regex"
+        ? { type: args.type, name: args.name, status: "downloaded" }
+        : { type: args.type, name: args.name, status: "pulled", reloadNeeded: args.type === "themes" };
+    }
+    if (!(await args.confirm({ type: args.type, count: 2 }))) return { type: args.type, total: 2, cancelled: true, results: [] };
+    args.onProgress({ type: args.type, done: 2, total: 2 });
+    const done = method === "pushAll" ? "pushed" : args.type === "regex" ? "downloaded" : "pulled";
+    return { type: args.type, total: 2, results: [{ name: "Daily", status: done }, { name: "Broken", status: "failed", message: "HTTP 500." }],
+      ...(method === "pullAll" && args.type !== "regex" ? { reloadNeeded: true } : {}) };
+  };
+  const relay = Object.fromEntries(["push", "pull", "pushAll", "pullAll"].map((method) => [method, async (args) => {
+    calls.push({ path: `/relay/${method}`, body: args });
+    return onRelay(method, args);
+  }]));
+  relay.refresh = async (types) => {
+    calls.push({ path: "/relay/refresh", body: types });
+    if (relayFailure) throw new Error(relayFailure);
+    return Object.fromEntries((types ?? Object.keys(relayRows)).map((type) => [type, relayRows[type]]));
+  };
   const adapter = { synthetic: "adapter" };
   const record = (path, { adapter: given, ...body }) => {
     assert.equal(given, adapter, "every content action uses the native ST adapter");
@@ -99,6 +126,10 @@ async function uiFixture() {
     createNativeStGateway: (options) => { wiring.gateway = options; return { synthetic: "gateway" }; },
     createMinimalSillyTavernAdapter: (gateway) => { wiring.adapterGateway = gateway; return adapter; },
     createMinimalSyncService: (options) => { wiring.service = options; return service; },
+    createStRelayGateway: (options) => { wiring.stRelay = options; return { synthetic: "st-relay" }; },
+    createRelayService: (options) => { wiring.relay = options; return relay; },
+    download: () => {},
+    createSyncPanel,
   };
   vm.runInNewContext(source, context);
   await Promise.resolve();
@@ -107,6 +138,10 @@ async function uiFixture() {
     rows(value) { nextRows = value; }, action(fn) { onAction = fn; }, batch(fn) { onBatch = fn; },
     confirm(value) { confirmation = value; }, emitOnSave(value) { emitOnSave = value; },
     tagSetting(value) { tagSetting = value; },
+    relayRows(value) { relayRows = { ...relayRows, ...value }; }, relayAction(fn) { onRelay = fn; },
+    relayFail(text) { relayFailure = text; },
+    async tab(label) { await panel.querySelectorAll("button").find(b => b.textContent === label && b.className.startsWith("tms-tab")).click(); },
+    rowTexts() { return this.field("rows").children.map(row => row.children[0].children[0].text()); },
     field(role) { return panel.querySelector(`[data-role="${role}"]`); },
     button(label) { return panel.querySelectorAll("button").find(b => b.textContent === label); },
   };
@@ -134,13 +169,20 @@ test("index wires the sync-state file, CSRF headers and UUIDs into the moved syn
   assert.equal(ui.wiring.gateway.requestHeaders, ui.context.getRequestHeaders);
   assert.equal(ui.wiring.gateway.uuid, ui.context.uuidv4);
   assert.equal(ui.wiring.adapterGateway.synthetic, "gateway");
+  assert.equal(ui.wiring.relay.sidecarStore, ui.wiring.service.sidecarStore, "the relay uses the same Manager endpoint");
+  assert.equal(ui.wiring.relay.st.synthetic, "st-relay");
+  assert.equal(ui.wiring.stRelay.requestHeaders, ui.context.getRequestHeaders);
+  assert.equal(ui.wiring.stRelay.getContext, ui.context.getContext);
+  assert.equal(ui.wiring.stRelay.download, ui.context.download);
   assert.equal(ui.field("endpoint").value, "http://synthetic.test/api/sync/v1");
   assert.deepEqual(ui.events, ["rename"]); // No edit listener can feed reconciliation back into sync.
 });
 
 test("sync state never saves ST settings, which every stale tab overwrites wholesale", async () => {
-  const source = await readFile(`${extensionRoot}/index.js`, "utf8");
-  assert.doesNotMatch(source, /saveSettings|createSettingsSidecarStore/);
+  for (const file of ["index.js", "panel.js", "relay-service.js", "st-relay.js"]) {
+    const source = await readFile(`${extensionRoot}/${file}`, "utf8");
+    assert.doesNotMatch(source, /saveSettings|createSettingsSidecarStore|\/api\/settings\/save/, file);
+  }
 });
 
 test("Save and Character rename call the service directly", async () => {
@@ -157,7 +199,7 @@ test("Save and Character rename call the service directly", async () => {
 test("extension declares scoped ST-themed CSS and an independently scrollable entity list", async () => {
   const manifest = JSON.parse(await readFile(`${extensionRoot}/manifest.json`, "utf8"));
   const css = await readFile(`${extensionRoot}/style.css`, "utf8");
-  const source = await readFile(`${extensionRoot}/index.js`, "utf8");
+  const source = await readFile(`${extensionRoot}/panel.js`, "utf8");
   assert.equal(manifest.css, "style.css");
   assert.match(source, /class="text_pole"/);
   assert.match(source, /class="inline-drawer"/);
@@ -168,7 +210,7 @@ test("extension declares scoped ST-themed CSS and an independently scrollable en
   assert.doesNotMatch(css, /(?:color|background(?:-color)?|border-color):\s*(?:#[0-9a-f]{3,8}|rgba?\(|hsla?\()/i);
 });
 
-test("search filters display names case-insensitively and clearing restores rows", async () => {
+test("search filters display names case-insensitively within the open tab, and clearing restores rows", async () => {
   const ui = await uiFixture();
   ui.rows([
     { entityType: "character", localId: "alpha-local", managerId: "alpha-manager", displayName: "Alpha Hero", status: "synced" },
@@ -176,17 +218,18 @@ test("search filters display names case-insensitively and clearing restores rows
     { entityType: "character", localId: null, managerId: "gamma-manager", displayName: "Gamma Guide", status: "manager_only" },
   ]);
   await ui.button("Refresh").click();
-  assert.equal(ui.field("rows").children.length, 3);
+  assert.deepEqual(ui.rowTexts(), ["Alpha Hero Synced", "Gamma Guide Manager only"]);
 
   ui.field("search").input("ALPHA");
-  assert.equal(ui.field("rows").children.length, 1);
-  assert.match(ui.field("rows").children[0].children[0].children[0].textContent, /Alpha Hero/);
+  assert.deepEqual(ui.rowTexts(), ["Alpha Hero Synced"]);
 
   ui.field("search").input("missing");
   assert.equal(ui.field("rows").children.length, 0);
-  assert.equal(ui.field("rows").textContent, "No matching entities.");
+  assert.equal(ui.field("rows").textContent, "No matching entries.");
   ui.field("search").input("");
-  assert.equal(ui.field("rows").children.length, 3);
+  assert.equal(ui.field("rows").children.length, 2);
+  await ui.tab("WorldBooks");
+  assert.deepEqual(ui.rowTexts(), ["Beta Lore ST only"]);
 });
 
 test("rows show a creator-notes line, search it, and an unsyncable row offers only Pull", async () => {
@@ -203,7 +246,9 @@ test("rows show a creator-notes line, search it, and an unsyncable row offers on
   assert.equal(notes[1].textContent, "Space version");
   assert.equal(notes[1].title, "Space version");
   assert.equal(plain.length, 1, "no notes, no line");
-  assert.match(broken[0].textContent, /Cannot sync/);
+  assert.equal(broken[0].textContent, "Broken");
+  assert.equal(broken[0].children[0].textContent, "Cannot sync");
+  assert.equal(broken[0].children[0].className, "tms-badge tms-badge-problem");
   assert.equal(broken[1].className, "tms-entity-error");
   assert.equal(broken[1].textContent, "Character's Note depth must be an integer.");
   assert.deepEqual(ui.field("rows").children[2].children.slice(1).map(b => b.textContent), ["Pull"]);
@@ -258,6 +303,7 @@ test("an ST-only Push asks to create, and asks again only if Manager unexpectedl
   const ui = await uiFixture();
   ui.rows([{ entityType: "worldbook", localId: "Lore", managerId: null, displayName: "Lore", status: "st_only" }]);
   await ui.button("Refresh").click();
+  await ui.tab("WorldBooks");
   let pushes = 0;
   ui.action((path) => {
     if (path === "/push" && ++pushes === 1) {
@@ -420,4 +466,187 @@ test("Stop is shown and usable only while a batch runs, and asks it to stop betw
   assert.equal(ui.field("message").textContent, "Push All cancelled.");
   assert.equal(ui.button("Stop").hidden, true);
   assert.equal(ui.button("Pull All").disabled, false);
+});
+
+// The tabbed panel and the file relay.
+const tabCounts = (ui) => Object.fromEntries(ui.field("tabs").children.map(tab => [tab.textContent, tab.children[0].textContent]));
+const toolbar = (ui) => ui.field("controls").children.filter(b => !b.hidden).map(b => b.textContent);
+
+test("each tab lists its own kind with a count, and brings its own batch buttons", async () => {
+  const ui = await uiFixture();
+  ui.rows([
+    { entityType: "character", localId: "a", managerId: "1", displayName: "Hero", status: "synced" },
+    { entityType: "worldbook", localId: "Lore", managerId: "2", displayName: "Lore", status: "synced" },
+  ]);
+  ui.relayRows({
+    presets: [{ type: "presets", name: "Daily", status: "st_only", local: { size: 2048 } }],
+    regex: [{ type: "regex", name: "Trim", status: "manager_only", manager: { size: 300, updatedAt: "", source: "file" } },
+      { type: "regex", name: "Hide", status: "same", local: { size: 10 }, manager: { size: 10, updatedAt: "", source: "file" } }],
+  });
+  await ui.button("Refresh").click();
+  assert.deepEqual(tabCounts(ui), { Characters: "1", WorldBooks: "1", Presets: "1", Themes: "0", Regex: "2" });
+  assert.deepEqual(ui.calls.filter(c => c.path.endsWith("refresh")).map(c => c.path), ["/refresh", "/relay/refresh"]);
+  assert.deepEqual(toolbar(ui), ["Refresh", "Sync All", "Push All", "Pull All"]);
+
+  await ui.tab("Presets");
+  assert.deepEqual(toolbar(ui), ["Refresh", "Push All", "Pull All"]);
+  assert.deepEqual(ui.rowTexts(), ["Daily ST only"]);
+  assert.equal(ui.field("rows").children[0].children[0].children[1].textContent, "2 KB in SillyTavern");
+  assert.deepEqual(ui.field("rows").children[0].children.slice(1).map(b => b.textContent), ["Push"]);
+
+  await ui.tab("Regex");
+  assert.deepEqual(toolbar(ui), ["Refresh", "Push All", "Download All"]);
+  // In the service's order.
+  assert.deepEqual(ui.rowTexts(), ["Trim Manager only", "Hide Same"]);
+  assert.deepEqual(ui.field("rows").children[0].children.slice(1).map(b => b.textContent), ["Download"]);
+  assert.equal(ui.field("tabs").children.find(tab => tab.textContent === "Regex").className, "tms-tab tms-tab-active");
+});
+
+test("status filters show only what is present, narrow the list, and reset with the tab", async () => {
+  const ui = await uiFixture();
+  ui.rows([
+    { entityType: "character", localId: "a", managerId: "1", displayName: "Changed", status: "st_changed" },
+    { entityType: "character", localId: "b", managerId: "2", displayName: "Mixed", status: "different" },
+    { entityType: "character", localId: "c", managerId: null, displayName: "Local", status: "st_only" },
+    { entityType: "character", localId: "d", managerId: "3", displayName: "Broken", status: "error", error: "Bad note." },
+  ]);
+  await ui.button("Refresh").click();
+  const chips = () => ui.field("filters").children.map(chip => `${chip.textContent} ${chip.children[0].textContent}`);
+  assert.deepEqual(chips(), ["All 4", "Changed 2", "ST only 1", "Problems 1"]);
+
+  await ui.button("Changed").click();
+  assert.deepEqual(ui.rowTexts(), ["Changed ST changed", "Mixed Different"]);
+  assert.equal(ui.field("filters").children.find(chip => chip.textContent === "Changed").className, "tms-chip tms-chip-active");
+  await ui.button("Problems").click();
+  assert.deepEqual(ui.rowTexts(), ["Broken Cannot sync"]);
+
+  await ui.tab("WorldBooks");
+  assert.deepEqual(chips(), ["All 0"]);
+  assert.equal(ui.field("rows").textContent, "Nothing here yet.");
+});
+
+test("a relay Push is confirmed as new or as a replacement; an equal file is not sent", async () => {
+  const ui = await uiFixture();
+  ui.relayRows({ presets: [
+    { type: "presets", name: "New <b>", status: "st_only", local: { size: 1 } },
+    { type: "presets", name: "Changed", status: "different", local: { size: 1 }, manager: { size: 2, updatedAt: "", source: "file" } },
+    { type: "presets", name: "Equal", status: "same", local: { size: 1 }, manager: { size: 1, updatedAt: "", source: "file" } },
+  ] });
+  await ui.button("Refresh").click();
+  await ui.tab("Presets");
+  const push = (index) => ui.field("rows").children[index].children[1].click();
+
+  await push(0);
+  await push(1);
+  assert.deepEqual(ui.confirmations.map(c => [c.text, c.okButton]), [
+    ['Push preset "New <b>" to Manager?', "Push"],
+    ['Push preset "Changed"? Manager\'s copy will be replaced with the SillyTavern version.', "Push"],
+  ]);
+  assert.deepEqual(JSON.parse(JSON.stringify(ui.calls.filter(c => c.path === "/relay/push").map(c => c.body))), [
+    { type: "presets", name: "New <b>", confirmOverwrite: false },
+    { type: "presets", name: "Changed", confirmOverwrite: true },
+  ]);
+  assert.equal(ui.field("message").textContent, 'Pushed "Changed".');
+  assert.deepEqual(ui.calls.filter(c => c.path === "/relay/refresh").at(-1).body, ["presets"], "only that type reloads");
+
+  await push(2);
+  assert.equal(ui.field("message").textContent, '"Equal" is already the same in Manager.');
+  assert.equal(ui.calls.filter(c => c.path === "/relay/push").length, 2);
+
+  ui.confirm(false);
+  await push(0);
+  assert.equal(ui.field("message").textContent, "Push cancelled.");
+  assert.equal(ui.calls.filter(c => c.path === "/relay/push").length, 2);
+});
+
+test("a relay Pull asks only before replacing, says what comes next, and regex scripts download", async () => {
+  const ui = await uiFixture();
+  const managerSide = { size: 5, updatedAt: "", source: "file" };
+  ui.relayRows({
+    presets: [{ type: "presets", name: "Remote", status: "manager_only", manager: managerSide },
+      { type: "presets", name: "Shared", status: "different", local: { size: 1 }, manager: managerSide }],
+    themes: [{ type: "themes", name: "Night", status: "manager_only", manager: managerSide }],
+    regex: [{ type: "regex", name: "Trim", status: "different", local: { size: 1 }, manager: managerSide }],
+  });
+  await ui.button("Refresh").click();
+  const pull = (index) => ui.field("rows").children[index].children.at(-1).click();
+
+  await ui.tab("Presets");
+  await pull(0);
+  assert.equal(ui.confirmations.length, 0, "a new preset needs no confirmation");
+  assert.equal(ui.field("message").textContent, 'Pulled "Remote"; it is now the selected preset.');
+  await pull(1);
+  assert.deepEqual(ui.confirmations.map(c => [c.text, c.okButton]), [['Replace SillyTavern\'s preset "Shared" with Manager\'s copy?', "Pull"]]);
+
+  await ui.tab("Themes");
+  await pull(0);
+  assert.equal(ui.field("message").textContent, 'Pulled "Night"; reload SillyTavern to see it in the theme list.');
+
+  await ui.tab("Regex");
+  await pull(0);
+  assert.equal(ui.confirmations.length, 1, "a download changes nothing, so it is not confirmed");
+  assert.equal(ui.field("message").textContent, 'Downloaded "Trim". Import it in SillyTavern\'s Regex panel.');
+  assert.deepEqual(JSON.parse(JSON.stringify(ui.calls.filter(c => c.path === "/relay/pull").map(c => c.body))), [
+    { type: "presets", name: "Remote", confirmOverwrite: false },
+    { type: "presets", name: "Shared", confirmOverwrite: true },
+    { type: "themes", name: "Night", confirmOverwrite: false },
+    { type: "regex", name: "Trim", confirmOverwrite: false },
+  ]);
+});
+
+test("a relay file that changed after the list was drawn is confirmed again before it is replaced", async () => {
+  const ui = await uiFixture();
+  ui.relayRows({ themes: [{ type: "themes", name: "Night", status: "st_only", local: { size: 1 } }] });
+  await ui.button("Refresh").click();
+  await ui.tab("Themes");
+  let attempts = 0;
+  ui.relayAction(async (method, args) => {
+    if (++attempts === 1) throw Object.assign(new Error("Confirm."), { code: "overwrite_confirmation_required" });
+    return { type: args.type, name: args.name, status: "pushed" };
+  });
+  await ui.field("rows").children[0].children[1].click();
+  assert.deepEqual(ui.confirmations.map(c => c.text), [
+    'Push theme "Night" to Manager?',
+    '"Night" now differs between SillyTavern and Manager. Replace the copy in Manager?',
+  ]);
+  assert.deepEqual(ui.calls.filter(c => c.path === "/relay/push").map(c => c.body.confirmOverwrite), [false, true]);
+});
+
+test("relay batches confirm once with the count, except a regex download, and summarize what happened", async () => {
+  const ui = await uiFixture();
+  await ui.button("Refresh").click();
+  await ui.tab("Themes");
+  await ui.button("Push All").click();
+  assert.deepEqual(ui.confirmations.map(c => [c.text, c.okButton]), [
+    ["Push All sends 2 themes that exist only in SillyTavern to Manager. Nothing already in Manager is changed.", "Push All"],
+  ]);
+  assert.equal(ui.field("message").textContent, "Push All: 1 pushed, 0 skipped, 1 failed. Failed: Broken: HTTP 500.");
+
+  await ui.button("Pull All").click();
+  assert.match(ui.confirmations[1].text, /^Pull All copies 2 themes that exist only in Manager into SillyTavern\./);
+  assert.match(ui.field("message").textContent, /^Pull All: 1 pulled, .* Reload SillyTavern to see them in its lists\.$/);
+
+  await ui.tab("Regex");
+  await ui.button("Download All").click();
+  assert.equal(ui.confirmations.length, 2, "downloading needs no confirmation");
+  assert.match(ui.field("message").textContent, /^Download All: 1 downloaded, .* Import the downloaded file in SillyTavern's Regex panel\.$/);
+
+  ui.confirm(false);
+  await ui.tab("Presets");
+  await ui.button("Push All").click();
+  assert.equal(ui.field("message").textContent, "Push All cancelled.");
+  assert.deepEqual(ui.calls.filter(c => c.path.startsWith("/relay/p")).map(c => [c.path, c.body.type]), [
+    ["/relay/pushAll", "themes"], ["/relay/pullAll", "themes"], ["/relay/pullAll", "regex"], ["/relay/pushAll", "presets"],
+  ]);
+});
+
+test("a Manager without the relay still syncs Characters; the file tabs say why they are empty", async () => {
+  const ui = await uiFixture();
+  ui.relayFail("Manager file list: HTTP 404");
+  ui.rows([{ entityType: "character", localId: "a", managerId: "1", displayName: "Hero", status: "synced" }]);
+  await ui.button("Refresh").click();
+  assert.equal(ui.field("message").textContent, "Refreshed.");
+  assert.deepEqual(ui.rowTexts(), ["Hero Synced"]);
+  await ui.tab("Presets");
+  assert.equal(ui.field("rows").textContent, "Presets, themes and regex are unavailable: Manager file list: HTTP 404");
 });
