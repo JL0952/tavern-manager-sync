@@ -1,5 +1,6 @@
 // Sync state for this SillyTavern user, with the same minimal schema the former
-// server-plugin sidecar.json used: { schemaVersion: 1, config: { endpoint }, bindings }.
+// server-plugin sidecar.json used: { schemaVersion: 1, config: { endpoint }, bindings },
+// plus the Manager access token in config once a password signed in.
 // It lives in its own user file. extension_settings is only the legacy location:
 // every tab saves the whole settings object, so a stale tab silently reverted it.
 
@@ -75,8 +76,10 @@ export function validateMinimalSidecar(sidecar) {
     throw new SidecarError(`Sync state schemaVersion must be ${MINIMAL_SIDECAR_SCHEMA_VERSION}.`);
   }
 
-  assertExactKeys(sidecar.config, ["endpoint"], "Sync state config");
+  const hasToken = isPlainObject(sidecar.config) && Object.hasOwn(sidecar.config, "token");
+  assertExactKeys(sidecar.config, hasToken ? ["endpoint", "token"] : ["endpoint"], "Sync state config");
   assertNullableString(sidecar.config.endpoint, "Sync state endpoint");
+  if (hasToken) assertNonEmptyString(sidecar.config.token, "Sync state token");
 
   if (!isPlainObject(sidecar.bindings)) {
     throw new SidecarError("Sync state bindings must be an object.");

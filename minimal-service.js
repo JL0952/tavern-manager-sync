@@ -751,17 +751,36 @@ export function createMinimalSyncService({ sidecarStore, fetch: fetchImpl = glob
     return runBatch({ action: "pull-all", status: "manager_only", item: pullNew, ...batchOptions("Pull All", options) });
   }
 
-  async function configure({ endpoint }) {
+  // Manager on another device asks for its password once; the access token it
+  // hands out is kept beside the endpoint, for every device using this
+  // SillyTavern. A different endpoint drops the old token.
+  async function signIn(endpoint, password) {
+    const response = await fetchImpl(endpoint.replace(/\/api\/sync\/v1$/, "/api/auth/login"), {
+      method: "POST", headers: { "content-type": "application/json" }, body: JSON.stringify({ password }),
+    });
+    if (!response.ok) throw await managerError(response, "sign-in");
+    const { token } = await response.json();
+    if (typeof token !== "string" || !token) throw fail("Manager sign-in returned no token.");
+    return token;
+  }
+
+  async function configure({ endpoint, password = "" }) {
     const url = new URL(endpoint);
     if (!["http:", "https:"].includes(url.protocol) || url.username || url.password || url.search || url.hash
       || !url.pathname.replace(/\/+$/, "").endsWith("/api/sync/v1")) throw fail("Invalid Manager endpoint.");
-    await sidecarStore.update((state) => { state.config.endpoint = url.href.replace(/\/+$/, ""); });
+    const href = url.href.replace(/\/+$/, "");
+    const token = password ? await signIn(href, password) : null;
+    await sidecarStore.update((state) => {
+      if (token) state.config.token = token;
+      else if (state.config.endpoint !== href) delete state.config.token;
+      state.config.endpoint = href;
+    });
     return getConfiguration();
   }
 
   async function getConfiguration() {
     const { config } = await sidecarStore.read();
-    return { endpoint: config.endpoint, configured: Boolean(config.endpoint) };
+    return { endpoint: config.endpoint, configured: Boolean(config.endpoint), signedIn: Boolean(config.token) };
   }
 
   async function renameLocal({ oldLocalId, newLocalId }) {

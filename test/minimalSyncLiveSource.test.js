@@ -15,7 +15,7 @@ class Element {
   addEventListener(event, fn) { this.listeners[event] = fn; }
   setAttribute(name, value) { this.attributes = { ...this.attributes, [name]: value }; }
   set innerHTML(html) { this.children = [...html.matchAll(/data-role="([^"]+)"/g)].map(([, role]) => {
-    const child = new Element(role === "endpoint" || role === "search" ? "input" : "div"); child.dataset.role = role; return child;
+    const child = new Element(["endpoint", "password", "search"].includes(role) ? "input" : "div"); child.dataset.role = role; return child;
   }); }
   descendants() { return this.children.flatMap(c => [c, ...c.descendants()]); }
   querySelector(selector) { const role = selector.match(/data-role="([^"]+)"/)?.[1]; return this.descendants().find(c => c.dataset.role === role); }
@@ -86,7 +86,7 @@ async function uiFixture() {
   };
   const service = {
     getConfiguration: async () => ({ endpoint: "http://synthetic.test/api/sync/v1", configured: true }),
-    configure: async (body) => { calls.push({ path: "/config", body }); return { ...body, configured: true }; },
+    configure: async (body) => { calls.push({ path: "/config", body }); return { endpoint: body.endpoint, configured: true, signedIn: Boolean(body.password) }; },
     refresh: async ({ discovery }) => { calls.push({ path: "/refresh", body: discovery }); return { rows: nextRows }; },
     push: async (args) => record("/push", args),
     pull: async (args) => record("/pull", args),
@@ -95,6 +95,7 @@ async function uiFixture() {
     pullAll: async (args) => recordBatch("/pull-all", args),
     renameLocal: async (body) => { calls.push({ path: "/rename", body }); return {}; },
   };
+  const managerFetch = async () => { throw new Error("no Manager in this test"); };
   const source = (await readFile(`${extensionRoot}/index.js`, "utf8")).replace(/^import [^;]*;\n/gm, "");
   const context = { document: { readyState: "complete", getElementById: id => id === "extensions_settings" ? container : null,
     createElement: tag => new Element(tag) },
@@ -125,6 +126,7 @@ async function uiFixture() {
     createFileSidecarStore: (options) => { wiring.store = options; return { synthetic: "store" }; },
     createNativeStGateway: (options) => { wiring.gateway = options; return { synthetic: "gateway" }; },
     createMinimalSillyTavernAdapter: (gateway) => { wiring.adapterGateway = gateway; return adapter; },
+    createManagerFetch: (options) => { wiring.managerFetch = options; return managerFetch; },
     createMinimalSyncService: (options) => { wiring.service = options; return service; },
     createStRelayGateway: (options) => { wiring.stRelay = options; return { synthetic: "st-relay" }; },
     createRelayService: (options) => { wiring.relay = options; return relay; },
@@ -170,6 +172,9 @@ test("index wires the sync-state file, CSRF headers and UUIDs into the moved syn
   assert.equal(ui.wiring.gateway.uuid, ui.context.uuidv4);
   assert.equal(ui.wiring.adapterGateway.synthetic, "gateway");
   assert.equal(ui.wiring.relay.sidecarStore, ui.wiring.service.sidecarStore, "the relay uses the same Manager endpoint");
+  assert.equal(ui.wiring.managerFetch.sidecarStore, ui.wiring.service.sidecarStore, "the token comes from the same sync state");
+  assert.equal(typeof ui.wiring.service.fetch, "function");
+  assert.equal(ui.wiring.relay.fetch, ui.wiring.service.fetch, "sync and relay requests both carry the Manager token");
   assert.equal(ui.wiring.relay.st.synthetic, "st-relay");
   assert.equal(ui.wiring.stRelay.requestHeaders, ui.context.getRequestHeaders);
   assert.equal(ui.wiring.stRelay.getContext, ui.context.getContext);
@@ -191,9 +196,20 @@ test("Save and Character rename call the service directly", async () => {
   await ui.button("Save").click();
   await ui.listeners.get("rename")[0]("Old Name.png", "New Name.png");
   assert.deepEqual(JSON.parse(JSON.stringify(ui.calls)), [
-    { path: "/config", body: { endpoint: "http://synthetic.test/api/sync/v1" } },
+    { path: "/config", body: { endpoint: "http://synthetic.test/api/sync/v1", password: "" } },
     { path: "/rename", body: { oldLocalId: "Old%20Name.png", newLocalId: "New%20Name.png" } },
   ]);
+});
+
+test("Save signs in with a typed password once and never keeps it in the field", async () => {
+  const ui = await uiFixture();
+  assert.equal(ui.field("password").placeholder, "Only if Manager is on another device");
+  ui.field("password").value = "synthetic pass";
+  await ui.button("Save").click();
+  assert.deepEqual(ui.calls.at(-1), { path: "/config", body: { endpoint: "http://synthetic.test/api/sync/v1", password: "synthetic pass" } });
+  assert.equal(ui.field("password").value, "");
+  assert.equal(ui.field("password").placeholder, "Signed in");
+  assert.equal(ui.field("message").textContent, "Endpoint saved and signed in to Manager.");
 });
 
 test("extension declares scoped ST-themed CSS and an independently scrollable entity list", async () => {

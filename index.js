@@ -3,6 +3,7 @@ import { extension_settings, getContext } from "../../../extensions.js";
 import { tag_import_setting } from "../../../tags.js";
 import { download, uuidv4 } from "../../../utils.js";
 import { worldInfoCache, reloadEditor, updateWorldInfoList } from "../../../world-info.js";
+import { createManagerFetch } from "./manager-fetch.js";
 import { createMinimalSyncService } from "./minimal-service.js";
 import { createSyncPanel } from "./panel.js";
 import { createSillyTavernFrontendReconciler } from "./reconcile.js";
@@ -27,7 +28,10 @@ const sidecarStore = createFileSidecarStore({
   legacySettings: extension_settings,
 });
 
-const service = createMinimalSyncService({ sidecarStore });
+// Manager on another device lets in only requests carrying its access token.
+const managerFetch = createManagerFetch({ sidecarStore });
+
+const service = createMinimalSyncService({ sidecarStore, fetch: managerFetch });
 
 // TauriTavern runs ST's frontend on a Rust backend without the Node-only
 // /api/worldinfo/list route; its platform object identifies it.
@@ -44,6 +48,7 @@ const adapter = createMinimalSillyTavernAdapter(
 // Presets, themes and regex scripts relay as files through the same Manager.
 const relay = createRelayService({
   sidecarStore,
+  fetch: managerFetch,
   st: createStRelayGateway({ requestHeaders: getRequestHeaders, getContext, download }),
 });
 

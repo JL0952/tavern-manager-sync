@@ -23,6 +23,11 @@
   align-items: flex-end;
 }
 
+#tavern_manager_sync .tms-password {
+  flex: 0 1 14rem;
+  min-width: 10rem;
+}
+
 /* Tabs: one per kind of entry, underlined like a selected page. */
 #tavern_manager_sync .tms-tabs {
   display: flex;

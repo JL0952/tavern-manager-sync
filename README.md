@@ -51,17 +51,17 @@ If Tavern Manager runs on the same machine as SillyTavern:
 
 If SillyTavern runs on another device on the same LAN:
 
-`http://<manager-lan-ip>:3000/api/sync/v1` (start Manager with `npm run dev:lan`)
+`http://<manager-lan-ip>:3000/api/sync/v1`, and enter the Manager password (set it in Manager first)
 
 Port `3000` is the Tavern Manager sync API.
 
-The Vite development port `5173` is only for the Manager web UI and should not be used as the sync endpoint.
+Port `5173` is only for Manager development and should not be used as the sync endpoint.
 
 ## Usage
 
 1. Start Tavern Manager.
 2. Open the Tavern Manager Sync extension in SillyTavern.
-3. Enter the Manager endpoint.
+3. Enter the Manager endpoint, and the Manager password if Manager runs on another device.
 4. Click **Save**.
 5. Click **Refresh**, then pick a tab: Characters, WorldBooks, Presets, Themes or Regex.
 6. Use **Push**, **Pull**, **Sync All**, **Push All**, or **Pull All**.

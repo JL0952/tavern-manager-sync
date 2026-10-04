@@ -91,6 +91,12 @@ export function createSyncPanel({
     if (panel) field("message").textContent = text;
   }
 
+  // The password itself is never kept; only whether Manager let this
+  // SillyTavern in.
+  function showPasswordState(config) {
+    field("password").placeholder = config.signedIn ? "Signed in" : "Only if Manager is on another device";
+  }
+
   function setBusy(value) {
     busy = value;
 
@@ -671,11 +677,15 @@ export function createSyncPanel({
 
     try {
       if (action === "save") {
-        await service.configure({
+        const password = field("password").value;
+        const config = await service.configure({
           endpoint: field("endpoint").value.trim(),
+          password,
         });
 
-        message("Endpoint saved.");
+        field("password").value = "";
+        showPasswordState(config);
+        message(password ? "Endpoint saved and signed in to Manager." : "Endpoint saved.");
         return;
       }
 
@@ -804,6 +814,15 @@ export function createSyncPanel({
                 placeholder="http://127.0.0.1:3000/api/sync/v1"
               >
             </label>
+            <label class="tms-field-label tms-password">
+              Manager password
+              <input
+                class="text_pole"
+                type="password"
+                data-role="password"
+                autocomplete="new-password"
+              >
+            </label>
             <div data-role="save"></div>
           </div>
 
@@ -857,6 +876,7 @@ export function createSyncPanel({
     service.getConfiguration()
       .then((config) => {
         field("endpoint").value = config.endpoint || "";
+        showPasswordState(config);
         message("Use Refresh to list entries.");
       })
       .catch((error) => message(error.message));
