@@ -1,6 +1,6 @@
 # Tavern Manager Sync
 
-A SillyTavern extension for synchronizing Characters, WorldBooks, presets, UI themes, and global regex scripts with [Tavern Manager](https://github.com/JL0952/ST_manager).
+A SillyTavern extension for synchronizing Characters, WorldBooks, presets, UI themes, and global regex scripts with [Tavern Manager](https://github.com/JL0952/tavern-manager).
 
 ## Features
 
@@ -51,7 +51,7 @@ If Tavern Manager runs on the same machine as SillyTavern:
 
 If SillyTavern runs on another device on the same LAN:
 
-`http://<manager-lan-ip>:3000/api/sync/v1`
+`http://<manager-lan-ip>:3000/api/sync/v1` (start Manager with `npm run dev:lan`)
 
 Port `3000` is the Tavern Manager sync API.
 
